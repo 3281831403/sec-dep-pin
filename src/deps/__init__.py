@@ -1,0 +1,1 @@
+"""Dependency lock auditing package for the sec-dep-pin exercise."""

@@ -1,0 +1,10 @@
+[project]
+name = "sec-dep-pin"
+version = "0.1.0"
+description = "Offline dependency lock pinning and audit exercise"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
