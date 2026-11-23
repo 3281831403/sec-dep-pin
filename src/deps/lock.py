@@ -1,9 +1,5 @@
 """Dependency lock auditing primitives.
 
-This module is the only implementation file in the exercise. Every public
-function is a stub: it raises NotImplementedError until the ten defects
-described in README.md are fixed in order.
-
 The lock document is JSON with this shape::
 
     {
@@ -29,157 +25,257 @@ import json
 import re
 import urllib.parse
 
+_REQUIRED_PACKAGE_FIELDS = ("name", "version", "source", "hashes")
+_HEX_RE = re.compile(r"[0-9a-f]+")
+_NAME_RUN_RE = re.compile(r"[-_.]+")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
 
 def parse_lock(text):
-    """Parse a JSON lock document into an ordered list of package entries.
-
-    Contract:
-    - ``text`` is UTF-8 JSON whose top-level value is an object containing a
-      ``packages`` array. Each package has string ``name``, ``version`` and
-      ``source`` fields, plus a ``hashes`` object mapping lowercase algorithm
-      names to lowercase hexadecimal digests.
-    - Return one new dict per package, in file order, preserving ``name``,
-      ``version``, ``source`` and every algorithm in ``hashes`` exactly.
-      Losing source or hashes is a defect; do not normalize names here.
-    - Do not merge duplicate entries: the list is a faithful record of the
-      lock file and duplicates may be evidence of the attack.
-    - Raise ValueError for malformed JSON, a missing/non-list ``packages``
-      value, or a package missing a required field or containing an invalid
-      field type. Never silently drop an unknown or malformed field.
-    """
-    raise NotImplementedError
+    """Parse a JSON lock document into an ordered list of package entries."""
+    if not isinstance(text, str):
+        raise ValueError("lock document must be a string")
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("malformed JSON lock document") from exc
+    if not isinstance(document, dict):
+        raise ValueError("lock document must be a JSON object")
+    packages = document.get("packages")
+    if not isinstance(packages, list):
+        raise ValueError("lock document must contain a packages array")
+    parsed = []
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ValueError("package entry must be an object")
+        unknown = set(package) - set(_REQUIRED_PACKAGE_FIELDS)
+        if unknown:
+            raise ValueError("package entry has unknown fields: %s" % sorted(unknown))
+        for field in ("name", "version", "source"):
+            if not isinstance(package.get(field), str):
+                raise ValueError("package entry missing string field %r" % field)
+        hashes = package.get("hashes")
+        if not isinstance(hashes, dict):
+            raise ValueError("package entry missing hashes object")
+        for algorithm, digest in hashes.items():
+            if not isinstance(algorithm, str) or not isinstance(digest, str):
+                raise ValueError("hashes must map strings to strings")
+        parsed.append(
+            {
+                "name": package["name"],
+                "version": package["version"],
+                "source": package["source"],
+                "hashes": dict(hashes),
+            }
+        )
+    return parsed
 
 
 def normalize_name(name):
-    """Return the canonical package name used for identity comparisons.
+    """Return the canonical package name used for identity comparisons."""
+    if not isinstance(name, str):
+        raise ValueError("package name must be a string")
+    if not name.strip():
+        raise ValueError("package name must not be empty")
+    return _NAME_RUN_RE.sub("-", name).lower()
 
-    Contract:
-    - Lower-case the name and collapse each run of hyphen, underscore or dot
-      into a single hyphen (PEP 503 style).
-    - Thus ``Acme_Utils``, ``acme-utils``, ``ACME--Utils`` and
-      ``acme.utils`` all normalize to ``acme-utils``. Treating an underscore
-      and a hyphen as different packages is a defect.
-    - Raise ValueError for a non-string or empty/whitespace-only name.
-    """
-    raise NotImplementedError
+
+def _canonical_url(url):
+    """Canonicalise a URL to a comparable tuple, or None when invalid."""
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS:
+        return None
+    if parts.username is not None or parts.password is not None:
+        return None
+    host = parts.hostname
+    if not host:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if port == _DEFAULT_PORTS[scheme]:
+        port = None
+    return (scheme, host.lower(), port, parts.path, parts.query, parts.fragment)
 
 
 def source_ok(entry, allowed):
-    """Return True only when the entry source exactly matches an allowed index.
+    """Return True only when the entry source exactly matches an allowed index."""
+    if not allowed:
+        return False
+    if not isinstance(entry, dict):
+        return False
+    candidate = _canonical_url(entry.get("source"))
+    if candidate is None:
+        return False
+    for url in allowed:
+        if _canonical_url(url) == candidate:
+            return True
+    return False
 
-    Contract:
-    - ``allowed`` is a sequence of index URLs. ``entry["source"]`` must match
-      one of them exactly after URL component canonicalisation: lower-case
-      scheme and host, remove a default port, and preserve the path, query and
-      fragment exactly. No implicit subpaths and no trailing-slash guesses.
-    - Compare complete URLs/components with equality. Never use prefix,
-      substring, startswith or host-suffix matching: a mirror such as
-      ``https://pypi.org/simple-mirror`` must not be accepted for
-      ``https://pypi.org/simple``.
-    - Return False for missing/malformed URLs, non-HTTP(S) schemes, empty
-      allowed lists, userinfo, or anything that is not an exact match.
-    """
-    raise NotImplementedError
+
+def _constant_time_equal(a, b):
+    """Compare two strings in constant time without ordinary equality."""
+    if len(a) != len(b):
+        return False
+    result = 0
+    for left, right in zip(a, b):
+        result |= ord(left) ^ ord(right)
+    return result == 0
 
 
 def hash_ok(artifact, entry):
-    """Return True only when every hash declared by the lock matches artifact.
-
-    Contract:
-    - ``artifact`` is the raw bytes-like content of the downloaded artifact.
-      For every algorithm in ``entry["hashes"]``, compute the digest with
-      hashlib and compare it with the locked value.
-    - Hash coverage is complete: all declared algorithms must be checked and
-      must match. A first-algorithm-only shortcut is a defect. A missing
-      artifact digest, an unknown algorithm or malformed hex data returns
-      False rather than being skipped.
-    - Digest comparison must be constant time and must not use ordinary
-      equality on digest strings (no ``==`` or ``!=`` and no short-circuit on
-      the first differing character). Length mismatches are False.
-    - At least one algorithm is required; an empty hash map is False.
-    """
-    raise NotImplementedError
+    """Return True only when every hash declared by the lock matches artifact."""
+    try:
+        data = bytes(artifact)
+    except (TypeError, ValueError):
+        return False
+    hashes = entry.get("hashes") if isinstance(entry, dict) else None
+    if not isinstance(hashes, dict) or not hashes:
+        return False
+    for algorithm, locked in hashes.items():
+        if not isinstance(algorithm, str) or not isinstance(locked, str):
+            return False
+        if not _HEX_RE.fullmatch(locked) or len(locked) % 2 != 0:
+            return False
+        try:
+            digest = hashlib.new(algorithm, data).hexdigest()
+        except (ValueError, TypeError):
+            return False
+        if not _constant_time_equal(digest, locked):
+            return False
+    return True
 
 
 def resolve(entries, constraints):
-    """Resolve exact version constraints to a canonical-name to entry mapping.
+    """Resolve exact version constraints to a canonical-name to entry mapping."""
+    indexed = {}
+    for entry in entries:
+        key = normalize_name(entry["name"])
+        indexed.setdefault(key, []).append(entry)
 
-    Contract:
-    - ``constraints`` is a sequence of mappings with ``name`` and an exact
-      ``version`` string; an optional ``source`` may narrow the entry.
-    - Every constraint must select exactly one entry by normalized name, an
-      exact version string (no ranges, no prefixes, no semver relaxation and
-      zero tolerance) and, when given, an exact source.
-    - Return a dict keyed by ``normalize_name(name)`` whose values are the
-      selected entry dicts. Do not mutate inputs.
-    - Raise ValueError when a version is missing, when two constraints demand
-      different exact versions of the same normalized package, when a
-      constraint is ambiguous because multiple entries have the same name,
-      version and optional source, or when no candidate exists. Never return
-      the first convenient match and never hide a conflict.
-    """
-    raise NotImplementedError
+    resolved = {}
+    demanded = {}
+    for constraint in constraints:
+        name = constraint.get("name")
+        version = constraint.get("version")
+        if not isinstance(version, str) or not version:
+            raise ValueError("constraint for %r is missing an exact version" % (name,))
+        key = normalize_name(name)
+        source = constraint.get("source")
+        if key in demanded:
+            previous_version, previous_source = demanded[key]
+            if previous_version != version or previous_source != source:
+                raise ValueError(
+                    "conflicting constraints for package %r" % key
+                )
+        else:
+            demanded[key] = (version, source)
+
+        candidates = [
+            entry
+            for entry in indexed.get(key, [])
+            if entry["version"] == version
+            and (source is None or entry["source"] == source)
+        ]
+        if not candidates:
+            raise ValueError(
+                "no entry satisfies %r version %r" % (key, version)
+            )
+        if len(candidates) > 1:
+            raise ValueError(
+                "ambiguous constraint %r version %r" % (key, version)
+            )
+        resolved[key] = candidates[0]
+    return resolved
+
+
+def _identity(entry):
+    return (normalize_name(entry["name"]), entry["source"])
 
 
 def diff(expected, actual):
-    """Compare locked entries with the entries actually installed or built.
+    """Compare locked entries with the entries actually installed or built."""
+    expected_by_id = {}
+    for entry in expected:
+        expected_by_id[_identity(entry)] = entry
+    actual_by_id = {}
+    for entry in actual:
+        actual_by_id[_identity(entry)] = entry
 
-    Contract:
-    - Match entries on the pair ``(normalize_name(name), exact source)``.
-      Version and hashes are compared as payload and are not part of identity.
-    - Return exactly three keys:
-      ``missing``: expected entries with no matching actual entry (deleted);
-      ``extra``: actual entries with no matching expected entry (unexpected);
-      ``changed``: list of ``{"expected": entry, "actual": entry}`` mappings
-      for matching identities whose version or hashes differ.
-    - A changed package is not missing; a deleted package is not changed.
-      Extras must be reported, not silently ignored, and an extra package with
-      the same normalized name but a different source is still extra.
-    - Results are deterministic, sorted by the identity key, and inputs are
-      not mutated.
-    """
-    raise NotImplementedError
+    missing = [
+        expected_by_id[key]
+        for key in sorted(expected_by_id)
+        if key not in actual_by_id
+    ]
+    extra = [
+        actual_by_id[key]
+        for key in sorted(actual_by_id)
+        if key not in expected_by_id
+    ]
+    changed = [
+        {"expected": expected_by_id[key], "actual": actual_by_id[key]}
+        for key in sorted(expected_by_id)
+        if key in actual_by_id
+        and (
+            expected_by_id[key]["version"] != actual_by_id[key]["version"]
+            or expected_by_id[key]["hashes"] != actual_by_id[key]["hashes"]
+        )
+    ]
+    return {"missing": missing, "extra": extra, "changed": changed}
 
 
 def validate_policy(policy):
-    """Return issue codes for an insecure dependency policy.
-
-    Contract:
-    - ``allowed_sources`` must be a non-empty sequence of exact URL strings
-      without wildcards. Missing, empty, blank or wildcard values produce
-      ``ANY_SOURCE``.
-    - ``verify_hashes`` must be exactly ``True``. Anything else produces
-      ``UNVERIFIED_HASHES``.
-    - ``require_transitive_pins`` must be exactly ``True``. Anything else
-      produces ``UNPINNED_TRANSITIVE``.
-    - Return codes in that order with no duplicates; a compliant policy
-      returns ``[]``. Missing keys must not raise. Never omit the hash check.
-    """
-    raise NotImplementedError
+    """Return issue codes for an insecure dependency policy."""
+    issues = []
+    sources = policy.get("allowed_sources")
+    if (
+        not isinstance(sources, (list, tuple))
+        or not sources
+        or any(
+            not isinstance(url, str)
+            or not url.strip()
+            or "*" in url
+            for url in sources
+        )
+    ):
+        issues.append("ANY_SOURCE")
+    if policy.get("verify_hashes") is not True:
+        issues.append("UNVERIFIED_HASHES")
+    if policy.get("require_transitive_pins") is not True:
+        issues.append("UNPINNED_TRANSITIVE")
+    return issues
 
 
 def lock_batch(manifests, policy):
-    """Validate multiple manifests independently and return per-manifest data.
+    """Validate multiple manifests independently and return per-manifest data."""
+    results = {}
+    for manifest in manifests:
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be a mapping")
+        manifest_id = manifest.get("id")
+        if not isinstance(manifest_id, str) or not manifest_id:
+            raise ValueError("manifest is missing a string id")
+        if manifest_id in results:
+            raise ValueError("duplicate manifest id %r" % manifest_id)
+        entries = manifest.get("entries")
+        constraints = manifest.get("constraints")
+        if not isinstance(entries, list) or not isinstance(constraints, list):
+            raise ValueError("manifest %r needs entries and constraints lists" % manifest_id)
 
-    Contract:
-    - ``manifests`` is a sequence of mappings, each with a unique string
-      ``id``, an ``entries`` list and a ``constraints`` list. An optional
-      ``actual`` list, when present, is compared with ``entries``.
-    - For each manifest, from scratch, call ``validate_policy(policy)`` and
-      ``resolve(entries, constraints)``. Return::
-
-          {
-            manifest_id: {
-              "issues": [...],
-              "resolved": {...},
-              "diff": {...}   # only when "actual" was supplied
-            }
-          }
-
-    - Manifests are fully independent: a package resolved for one manifest
-      must never satisfy, seed or overwrite a later manifest. The same
-      manifest must produce the same result whether run alone or in a batch.
-    - Preserve input order in the returned dict. Raise ValueError for a
-      duplicate/missing id or a malformed manifest.
-    """
-    raise NotImplementedError
+        # Each manifest is validated from scratch; nothing is shared or
+        # reused between manifests.
+        report = {
+            "issues": validate_policy(policy),
+            "resolved": resolve(entries, constraints),
+        }
+        if "actual" in manifest:
+            report["diff"] = diff(entries, manifest["actual"])
+        results[manifest_id] = report
+    return results
